@@ -493,58 +493,60 @@ export const Room = ({
     return (
         <div className="min-h-screen bg-gray-100 flex flex-col">
             {/* Header */}
-            <div className="bg-blue-600 text-white p-4">
-                <div className="max-w-7xl mx-auto flex items-center justify-between">
+            <div className="bg-blue-600 text-white p-3 md:p-4">
+                <div className="max-w-7xl mx-auto flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
                     <div>
-                        <h1 className="text-xl font-bold">Omegle</h1>
-                        <p className={`text-sm ${getStatusColor()}`}>
+                        <h1 className="text-lg md:text-xl font-bold">Omegle</h1>
+                        <p className={`text-xs md:text-sm ${getStatusColor()}`}>
                             {lobby ? "Looking for someone you can chat with..." : getStatusText()}
                         </p>
                     </div>
-                    <div className="flex gap-2">
+                    <div className="flex gap-2 w-full sm:w-auto">
                         {!lobby && connectionStatus === "connected" && (
                             <Button
                                 variant="outline"
-                                className="bg-red-50 text-red-600 hover:bg-red-100 border-red-200"
+                                size="sm"
+                                className="bg-red-50 text-red-600 hover:bg-red-100 border-red-200 flex-1 sm:flex-none"
                                 onClick={handleDisconnect}
                             >
-                                <LogOut className="w-4 h-4 mr-2" />
-                                Disconnect
+                                <LogOut className="w-3 h-3 md:w-4 md:h-4 mr-1 md:mr-2" />
+                                <span className="text-xs md:text-sm">Disconnect</span>
                             </Button>
                         )}
                         <Button
                             variant="outline"
-                            className="bg-white text-blue-600 hover:bg-gray-100"
+                            size="sm"
+                            className="bg-white text-blue-600 hover:bg-gray-100 flex-1 sm:flex-none"
                             onClick={handleNewChat}
                             disabled={lobby && connectionStatus === "connecting"}
                         >
-                            <SkipForward className="w-4 h-4 mr-2" />
-                            {connectionStatus === "disconnected" ? "Find New Partner" : "New Chat"}
+                            <SkipForward className="w-3 h-3 md:w-4 md:h-4 mr-1 md:mr-2" />
+                            <span className="text-xs md:text-sm">{connectionStatus === "disconnected" ? "Find New Partner" : "New Chat"}</span>
                         </Button>
                     </div>
                 </div>
             </div>
 
             {/* Main Chat Area */}
-            <div className="flex-1 flex max-w-7xl mx-auto w-full">
+            <div className="flex-1 flex flex-col lg:flex-row max-w-7xl mx-auto w-full overflow-hidden">
                 {/* Video Section */}
-                <div className="flex-1 p-4">
-                    <div className="grid gap-4 h-full grid-cols-1 lg:grid-cols-2">
+                <div className="flex-1 p-2 md:p-4 min-h-0">
+                    <div className="grid gap-2 md:gap-4 h-full grid-cols-1 sm:grid-cols-2">
                         {/* Stranger's Video */}
-                        <div className="bg-black rounded-lg overflow-hidden relative aspect-video lg:aspect-auto">
+                        <div className="bg-black rounded-lg overflow-hidden relative aspect-video sm:aspect-auto min-h-[200px] sm:min-h-0">
                             {lobby ? (
                                 <div className="flex items-center justify-center h-full text-white">
                                     <div className="text-center">
-                                        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-white mx-auto mb-4"></div>
-                                        <p>Connecting...</p>
+                                        <div className="animate-spin rounded-full h-6 w-6 md:h-8 md:w-8 border-b-2 border-white mx-auto mb-2 md:mb-4"></div>
+                                        <p className="text-xs md:text-sm">Connecting...</p>
                                     </div>
                                 </div>
                             ) : connectionStatus === "disconnected" ? (
-                                <div className="flex items-center justify-center h-full text-white">
+                                <div className="flex items-center justify-center h-full text-white px-4">
                                     <div className="text-center">
-                                        <AlertCircle className="h-8 w-8 mx-auto mb-4 text-red-400" />
-                                        <p>User disconnected</p>
-                                        <p className="text-sm text-gray-400 mt-2">Click "Find New Partner" to continue</p>
+                                        <AlertCircle className="h-6 w-6 md:h-8 md:w-8 mx-auto mb-2 md:mb-4 text-red-400" />
+                                        <p className="text-xs md:text-sm">User disconnected</p>
+                                        <p className="text-xs text-gray-400 mt-1 md:mt-2">Click "Find New Partner" to continue</p>
                                     </div>
                                 </div>
                             ) : (
@@ -555,13 +557,13 @@ export const Room = ({
                                     className="w-full h-full object-cover"
                                 />
                             )}
-                            <div className="absolute bottom-2 left-2 bg-black/50 text-white text-xs px-2 py-1 rounded">
+                            <div className="absolute bottom-1 left-1 md:bottom-2 md:left-2 bg-black/50 text-white text-xs px-2 py-1 rounded">
                                 Stranger
                             </div>
                         </div>
 
                         {/* Your Video */}
-                        <div className="bg-black rounded-lg overflow-hidden relative aspect-video lg:aspect-auto">
+                        <div className="bg-black rounded-lg overflow-hidden relative aspect-video sm:aspect-auto min-h-[200px] sm:min-h-0">
                             <video
                                 autoPlay
                                 muted
@@ -569,25 +571,27 @@ export const Room = ({
                                 ref={localVideoRef}
                                 className="w-full h-full object-cover"
                             />
-                            <div className="absolute bottom-2 left-2 bg-black/50 text-white text-xs px-2 py-1 rounded">
+                            <div className="absolute bottom-1 left-1 md:bottom-2 md:left-2 bg-black/50 text-white text-xs px-2 py-1 rounded">
                                 You
                             </div>
 
                             {/* Video Controls */}
-                            <div className="absolute bottom-2 right-2 flex gap-2">
+                            <div className="absolute bottom-1 right-1 md:bottom-2 md:right-2 flex gap-1 md:gap-2">
                                 <Button
                                     size="sm"
                                     variant={isAudioEnabled ? "default" : "destructive"}
                                     onClick={() => setIsAudioEnabled(!isAudioEnabled)}
+                                    className="h-7 w-7 md:h-8 md:w-8 p-0"
                                 >
-                                    {isAudioEnabled ? <Mic className="w-4 h-4" /> : <MicOff className="w-4 h-4" />}
+                                    {isAudioEnabled ? <Mic className="w-3 h-3 md:w-4 md:h-4" /> : <MicOff className="w-3 h-3 md:w-4 md:h-4" />}
                                 </Button>
                                 <Button
                                     size="sm"
                                     variant={isVideoEnabled ? "default" : "destructive"}
                                     onClick={() => setIsVideoEnabled(!isVideoEnabled)}
+                                    className="h-7 w-7 md:h-8 md:w-8 p-0"
                                 >
-                                    {isVideoEnabled ? <Video className="w-4 h-4" /> : <VideoOff className="w-4 h-4" />}
+                                    {isVideoEnabled ? <Video className="w-3 h-3 md:w-4 md:h-4" /> : <VideoOff className="w-3 h-3 md:w-4 md:h-4" />}
                                 </Button>
                             </div>
                         </div>
@@ -595,16 +599,16 @@ export const Room = ({
                 </div>
 
                 {/* Chat Section */}
-                <div className="w-80 bg-white border-l border-gray-200 flex flex-col">
+                <div className="w-full lg:w-80 bg-white border-t lg:border-t-0 lg:border-l border-gray-200 flex flex-col h-[300px] sm:h-[400px] lg:h-auto">
                     {/* Chat Header */}
-                    <div className="p-4 border-b border-gray-200">
-                        <h3 className="font-semibold text-gray-800">Chat</h3>
+                    <div className="p-3 md:p-4 border-b border-gray-200">
+                        <h3 className="font-semibold text-gray-800 text-sm md:text-base">Chat</h3>
                         <div className="flex items-center gap-2">
                             <div className={`w-2 h-2 rounded-full ${
                                 connectionStatus === "connected" ? "bg-green-500" : 
                                 connectionStatus === "disconnected" ? "bg-red-500" : "bg-yellow-500"
                             }`} />
-                            <p className="text-sm text-gray-600">
+                            <p className="text-xs md:text-sm text-gray-600">
                                 {lobby ? "Waiting for connection..." : 
                                  connectionStatus === "disconnected" ? "Disconnected" : "Connected"}
                             </p>
@@ -612,16 +616,16 @@ export const Room = ({
                     </div>
 
                     {/* Messages */}
-                    <div className="flex-1 overflow-y-auto p-4 space-y-3">
+                    <div className="flex-1 overflow-y-auto p-3 md:p-4 space-y-2 md:space-y-3 min-h-0">
                         {messages.length === 0 ? (
-                            <div className="text-center text-gray-500 text-sm">
+                            <div className="text-center text-gray-500 text-xs md:text-sm">
                                 {lobby ? "Messages will appear here once connected" : "Start the conversation!"}
                             </div>
                         ) : (
                             messages.map((msg, index) => (
                                 <div key={index} className={`${msg.sender === "you" ? "text-right" : "text-left"}`}>
                                     <div
-                                        className={`inline-block max-w-xs px-3 py-2 rounded-lg text-sm ${
+                                        className={`inline-block max-w-[85%] sm:max-w-xs px-2 md:px-3 py-1.5 md:py-2 rounded-lg text-xs md:text-sm ${
                                             msg.sender === "you"
                                                 ? "bg-blue-600 text-white"
                                                 : "bg-gray-200 text-gray-800"
@@ -629,7 +633,7 @@ export const Room = ({
                                     >
                                         {msg.text}
                                     </div>
-                                    <div className="text-xs text-gray-500 mt-1">
+                                    <div className="text-[10px] md:text-xs text-gray-500 mt-1">
                                         {msg.sender === "you" ? "You" : (msg.senderName || "Stranger")} • {msg.timestamp.toLocaleTimeString()}
                                     </div>
                                 </div>
@@ -639,16 +643,16 @@ export const Room = ({
                         {/* Typing indicator */}
                         {strangerTyping && (
                             <div className="text-left">
-                                <div className="inline-block bg-gray-200 text-gray-800 px-3 py-2 rounded-lg text-sm">
+                                <div className="inline-block bg-gray-200 text-gray-800 px-2 md:px-3 py-1.5 md:py-2 rounded-lg text-xs md:text-sm">
                                     <div className="flex items-center gap-1">
                                         <div className="flex gap-1">
-                                            <div className="w-2 h-2 bg-gray-500 rounded-full animate-bounce" style={{ animationDelay: '0ms' }}></div>
-                                            <div className="w-2 h-2 bg-gray-500 rounded-full animate-bounce" style={{ animationDelay: '150ms' }}></div>
-                                            <div className="w-2 h-2 bg-gray-500 rounded-full animate-bounce" style={{ animationDelay: '300ms' }}></div>
+                                            <div className="w-1.5 h-1.5 md:w-2 md:h-2 bg-gray-500 rounded-full animate-bounce" style={{ animationDelay: '0ms' }}></div>
+                                            <div className="w-1.5 h-1.5 md:w-2 md:h-2 bg-gray-500 rounded-full animate-bounce" style={{ animationDelay: '150ms' }}></div>
+                                            <div className="w-1.5 h-1.5 md:w-2 md:h-2 bg-gray-500 rounded-full animate-bounce" style={{ animationDelay: '300ms' }}></div>
                                         </div>
                                     </div>
                                 </div>
-                                <div className="text-xs text-gray-500 mt-1">
+                                <div className="text-[10px] md:text-xs text-gray-500 mt-1">
                                     Stranger is typing...
                                 </div>
                             </div>
@@ -658,7 +662,7 @@ export const Room = ({
                     </div>
 
                     {/* Message Input */}
-                    <div className="p-4 border-t border-gray-200">
+                    <div className="p-3 md:p-4 border-t border-gray-200">
                         <div className="flex gap-2">
                             <Input
                                 placeholder={lobby ? "Wait for connection..." : "Type a message..."}
@@ -666,19 +670,20 @@ export const Room = ({
                                 onChange={handleInputChange}
                                 onKeyPress={(e) => e.key === "Enter" && handleSendMessage()}
                                 disabled={lobby || connectionStatus === "disconnected"}
-                                className="flex-1"
+                                className="flex-1 text-xs md:text-sm"
                                 maxLength={500}
                             />
                             <Button
                                 onClick={handleSendMessage}
                                 disabled={lobby || !message.trim() || connectionStatus === "disconnected"}
                                 size="sm"
+                                className="px-2 md:px-3"
                             >
-                                <Send className="w-4 h-4" />
+                                <Send className="w-3 h-3 md:w-4 md:h-4" />
                             </Button>
                         </div>
                         {message.length > 450 && (
-                            <div className="text-xs text-gray-500 mt-1">
+                            <div className="text-[10px] md:text-xs text-gray-500 mt-1">
                                 {500 - message.length} characters remaining
                             </div>
                         )}
