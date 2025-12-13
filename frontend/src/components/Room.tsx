@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react"
 import { type Socket, io } from "socket.io-client"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
-import { Send, SkipForward, Mic, MicOff, Video, VideoOff, AlertCircle } from "lucide-react"
+import { Send, SkipForward, Mic, MicOff, Video, VideoOff, AlertCircle, LogOut } from "lucide-react"
 
 const URL = import.meta.env.VITE_API_URL;
 
@@ -28,7 +28,6 @@ export const Room = ({
     const [receivingPc, setReceivingPc] = useState<null | RTCPeerConnection>(null)
     const [remoteVideoTrack, setRemoteVideoTrack] = useState<MediaStreamTrack | null>(null)
     const [remoteAudioTrack, setRemoteAudioTrack] = useState<MediaStreamTrack | null>(null)
-    const [remoteMediaStream, setRemoteMediaStream] = useState<MediaStream | null>(null)
     const remoteVideoRef = useRef<HTMLVideoElement>(null)
     const localVideoRef = useRef<HTMLVideoElement>(null)
     const messagesEndRef = useRef<HTMLDivElement>(null)
@@ -42,10 +41,9 @@ export const Room = ({
     const [strangerTyping, setStrangerTyping] = useState(false)
     const [connectionStatus, setConnectionStatus] = useState<"connecting" | "connected" | "disconnected">("connecting")
 
-    // Typing timeout ref
     const typingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const remoteStreamRef = useRef<MediaStream | null>(null);
 
-    // Auto scroll to bottom when new messages arrive
     const scrollToBottom = () => {
         messagesEndRef.current?.scrollIntoView({ behavior: "smooth" })
     }
@@ -54,7 +52,6 @@ export const Room = ({
         scrollToBottom()
     }, [messages])
 
-    // Handle typing indicator
     const handleTyping = () => {
         if (!socket || !currentRoomId) return
 
@@ -63,12 +60,10 @@ export const Room = ({
             socket.emit("typing", { isTyping: true, roomId: currentRoomId })
         }
 
-        // Clear existing timeout
         if (typingTimeoutRef.current) {
             clearTimeout(typingTimeoutRef.current)
         }
 
-        // Set new timeout
         typingTimeoutRef.current = setTimeout(() => {
             setIsTyping(false)
             socket.emit("typing", { isTyping: false, roomId: currentRoomId })
@@ -78,24 +73,74 @@ export const Room = ({
     useEffect(() => {
         const socket = io(URL)
 
-        // Emit join event with name
         socket.emit("join", { name })
 
         socket.on('send-offer', async ({ roomId }) => {
-            console.log("sending offer")
+            console.log("🔵 Sending offer - Setting up peer connection")
             setLobby(false)
             setCurrentRoomId(roomId)
             setConnectionStatus("connected")
             
             const pc = new RTCPeerConnection({
-                iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+                iceServers: [
+                    { urls: 'stun:stun.l.google.com:19302' },
+                    { urls: 'stun:stun1.l.google.com:19302' }
+                ]
             })
 
+            // Create and set up remote stream FIRST
+            const stream = new MediaStream()
+            remoteStreamRef.current = stream
+            if (remoteVideoRef.current) {
+                remoteVideoRef.current.srcObject = stream
+                // Ensure video plays
+                remoteVideoRef.current.play().catch(e => console.log("Play error:", e))
+            }
+
+            // Handle incoming tracks
+            pc.ontrack = (e) => {
+                console.log("📹 Received track on sender side:", e.track.kind, "readyState:", e.track.readyState)
+                
+                const stream = remoteStreamRef.current
+                if (!stream) return
+
+                // Remove existing track of same kind if present
+                const existingTracks = stream.getTracks().filter(t => t.kind === e.track.kind)
+                existingTracks.forEach(t => stream.removeTrack(t))
+
+                // Add new track
+                stream.addTrack(e.track)
+                
+                if (e.track.kind === "video") {
+                    setRemoteVideoTrack(e.track)
+                } else if (e.track.kind === "audio") {
+                    setRemoteAudioTrack(e.track)
+                }
+
+                // Re-assign stream to ensure video element picks it up
+                if (remoteVideoRef.current && remoteVideoRef.current.srcObject !== stream) {
+                    remoteVideoRef.current.srcObject = stream
+                    remoteVideoRef.current.play().catch(e => console.log("Play error:", e))
+                }
+            }
+
+            // Monitor connection state
+            pc.onconnectionstatechange = () => {
+                console.log("Connection state:", pc.connectionState)
+                if (pc.connectionState === "failed" || pc.connectionState === "disconnected") {
+                    setConnectionStatus("disconnected")
+                }
+            }
+
             setSendingPc(pc)
+            
+            // Add local tracks
             if (localVideoTrack) {
+                console.log("➕ Adding local video track")
                 pc.addTrack(localVideoTrack)
             }
             if (localAudioTrack) {
+                console.log("➕ Adding local audio track")
                 pc.addTrack(localAudioTrack)
             }
 
@@ -110,6 +155,7 @@ export const Room = ({
             }
 
             pc.onnegotiationneeded = async () => {
+                console.log("🤝 Negotiation needed, creating offer")
                 const sdp = await pc.createOffer()
                 await pc.setLocalDescription(sdp)
                 socket.emit("offer", {
@@ -117,43 +163,81 @@ export const Room = ({
                     roomId
                 })
             }
-
-            // If you later add datachannels for other purposes, handle them here.
-            pc.ondatachannel = (event) => {
-                console.log("📡 Received data channel (currently unused)")
-                // Intentionally left blank for now.
-            }
         })
 
         socket.on("offer", async ({ roomId, sdp: remoteSdp }) => {
-            console.log("received offer")
+            console.log("🟢 Received offer - Setting up peer connection")
             setLobby(false)
             setCurrentRoomId(roomId)
             setConnectionStatus("connected")
             
             const pc = new RTCPeerConnection({
-                iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+                iceServers: [
+                    { urls: 'stun:stun.l.google.com:19302' },
+                    { urls: 'stun:stun1.l.google.com:19302' }
+                ]
             })
+            
+            // Create and set up remote stream FIRST
+            const stream = new MediaStream()
+            remoteStreamRef.current = stream
+            if (remoteVideoRef.current) {
+                remoteVideoRef.current.srcObject = stream
+                remoteVideoRef.current.play().catch(e => console.log("Play error:", e))
+            }
+            
+            // Handle incoming tracks
+            pc.ontrack = (e) => {
+                console.log("📹 Received track on receiver side:", e.track.kind, "readyState:", e.track.readyState)
+                
+                const stream = remoteStreamRef.current
+                if (!stream) return
+
+                // Remove existing track of same kind if present
+                const existingTracks = stream.getTracks().filter(t => t.kind === e.track.kind)
+                existingTracks.forEach(t => stream.removeTrack(t))
+
+                // Add new track
+                stream.addTrack(e.track)
+                
+                if (e.track.kind === "video") {
+                    setRemoteVideoTrack(e.track)
+                } else if (e.track.kind === "audio") {
+                    setRemoteAudioTrack(e.track)
+                }
+
+                // Re-assign stream to ensure video element picks it up
+                if (remoteVideoRef.current && remoteVideoRef.current.srcObject !== stream) {
+                    remoteVideoRef.current.srcObject = stream
+                    remoteVideoRef.current.play().catch(e => console.log("Play error:", e))
+                }
+            }
+
+            // Monitor connection state
+            pc.onconnectionstatechange = () => {
+                console.log("Connection state:", pc.connectionState)
+                if (pc.connectionState === "failed" || pc.connectionState === "disconnected") {
+                    setConnectionStatus("disconnected")
+                }
+            }
+
+            // Add local tracks BEFORE creating answer
+            if (localVideoTrack) {
+                console.log("➕ Adding local video track")
+                pc.addTrack(localVideoTrack)
+            }
+            if (localAudioTrack) {
+                console.log("➕ Adding local audio track")
+                pc.addTrack(localAudioTrack)
+            }
+            
             await pc.setRemoteDescription(remoteSdp)
             const sdp = await pc.createAnswer()
             await pc.setLocalDescription(sdp)
 
-            const stream = new MediaStream()
-            if (remoteVideoRef.current) {
-                remoteVideoRef.current.srcObject = stream
-            }
-
-            setRemoteMediaStream(stream)
             setReceivingPc(pc)
 
-            pc.ontrack = (e) => {
-                console.log("ontrack event received")
-            }
-
             pc.onicecandidate = async (e) => {
-                if (!e.candidate) {
-                    return
-                }
                 if (e.candidate) {
                     socket.emit("add-ice-candidate", {
                         candidate: e.candidate,
@@ -163,38 +247,10 @@ export const Room = ({
                 }
             }
 
-            pc.ondatachannel = (event) => {
-                console.log("📡 Received data channel (currently unused)")
-            }
-
             socket.emit("answer", {
                 roomId,
                 sdp: sdp
             })
-
-            // Wait briefly and attach incoming tracks to remote video element
-            setTimeout(() => {
-                const transceivers = pc.getTransceivers()
-                if (transceivers.length >= 2) {
-                    const track1 = transceivers[0].receiver.track
-                    const track2 = transceivers[1].receiver.track
-                    if (track1.kind === "video") {
-                        setRemoteAudioTrack(track2)
-                        setRemoteVideoTrack(track1)
-                    } else {
-                        setRemoteAudioTrack(track1)
-                        setRemoteVideoTrack(track2)
-                    }
-                    if (remoteVideoRef.current && remoteVideoRef.current.srcObject) {
-                        // @ts-ignore
-                        remoteVideoRef.current.srcObject.addTrack(track1)
-                        // @ts-ignore
-                        remoteVideoRef.current.srcObject.addTrack(track2)
-                        // @ts-ignore
-                        remoteVideoRef.current.play()
-                    }
-                }
-            }, 5000)
         })
 
         socket.on("answer", ({ roomId, sdp: remoteSdp }) => {
@@ -203,13 +259,17 @@ export const Room = ({
             setCurrentRoomId(roomId)
             setConnectionStatus("connected")
             setSendingPc(pc => {
-                pc?.setRemoteDescription(remoteSdp)
+                if (pc) {
+                    console.log("🔗 Setting remote description from answer")
+                    pc.setRemoteDescription(remoteSdp)
+                }
                 return pc
             })
-            console.log("loop closed")
+            console.log("🔄 Connection loop closed")
         })
 
         socket.on("lobby", () => {
+            console.log("🏠 Moved to lobby")
             setLobby(true)
             setConnectionStatus("connecting")
             setCurrentRoomId(null)
@@ -218,21 +278,28 @@ export const Room = ({
         })
 
         socket.on("add-ice-candidate", ({ candidate, type }) => {
-            console.log("add ice candidate from remote", { candidate, type })
+            console.log("🧊 Adding ICE candidate:", type)
             if (type == "sender") {
                 setReceivingPc(pc => {
-                    pc?.addIceCandidate(candidate)
+                    if (pc) {
+                        pc.addIceCandidate(candidate).catch(e => 
+                            console.log("Error adding ICE candidate:", e)
+                        )
+                    }
                     return pc
                 })
             } else {
                 setSendingPc(pc => {
-                    pc?.addIceCandidate(candidate)
+                    if (pc) {
+                        pc.addIceCandidate(candidate).catch(e => 
+                            console.log("Error adding ICE candidate:", e)
+                        )
+                    }
                     return pc
                 })
             }
         })
 
-        // Handle incoming messages
         socket.on("receive-message", ({ message, sender, senderName, timestamp }) => {
             const newMessage: Message = {
                 text: message,
@@ -243,18 +310,16 @@ export const Room = ({
             setMessages(prev => [...prev, newMessage])
         })
 
-        // Handle message sent confirmation
         socket.on("message-sent", ({ message, timestamp }) => {
             console.log("Message sent confirmation received")
         })
 
-        // Handle typing indicators
         socket.on("user-typing", ({ isTyping }) => {
             setStrangerTyping(isTyping)
         })
 
-        // Handle user disconnection
         socket.on("user-disconnected", ({ message }) => {
+            console.log("👋 User disconnected")
             setConnectionStatus("disconnected")
             const disconnectMessage: Message = {
                 text: message,
@@ -262,16 +327,12 @@ export const Room = ({
                 timestamp: new Date(),
             }
             setMessages(prev => [...prev, disconnectMessage])
-            
-            // Auto redirect to lobby after 3 seconds
-            setTimeout(() => {
-                handleNewChat()
-            }, 3000)
         })
 
         setSocket(socket)
 
         return () => {
+            console.log("🔌 Disconnecting socket")
             socket.disconnect()
             if (typingTimeoutRef.current) {
                 clearTimeout(typingTimeoutRef.current)
@@ -279,23 +340,23 @@ export const Room = ({
         }
     }, [name])
 
-    // Setup local video
+    // Setup local video - separated from socket effect to avoid recreating socket
     useEffect(() => {
-        if (localVideoRef.current) {
-            if (localVideoTrack) {
-                localVideoRef.current.srcObject = new MediaStream([localVideoTrack])
-                localVideoRef.current.play()
-            }
+        if (localVideoRef.current && localVideoTrack) {
+            const stream = new MediaStream([localVideoTrack])
+            localVideoRef.current.srcObject = stream
+            localVideoRef.current.play().catch(e => console.log("Local video play error:", e))
         }
     }, [localVideoTrack])
 
-    // Handle audio/video toggle
+    // Handle audio toggle
     useEffect(() => {
         if (localAudioTrack) {
             localAudioTrack.enabled = isAudioEnabled
         }
     }, [isAudioEnabled, localAudioTrack])
 
+    // Handle video toggle
     useEffect(() => {
         if (localVideoTrack) {
             localVideoTrack.enabled = isVideoEnabled
@@ -312,7 +373,6 @@ export const Room = ({
 
             setMessages(prev => [...prev, newMessage])
 
-            // Send message through socket
             socket.emit("send-message", {
                 message: message.trim(),
                 roomId: currentRoomId
@@ -320,7 +380,6 @@ export const Room = ({
 
             setMessage("")
             
-            // Stop typing indicator
             if (isTyping) {
                 setIsTyping(false)
                 socket.emit("typing", { isTyping: false, roomId: currentRoomId })
@@ -328,7 +387,9 @@ export const Room = ({
         }
     }
 
-    const handleNewChat = () => {
+    const handleDisconnect = () => {
+        console.log("🚪 User initiated disconnect")
+        
         // Clean up existing connections
         if (sendingPc) {
             sendingPc.close()
@@ -339,18 +400,67 @@ export const Room = ({
             setReceivingPc(null)
         }
 
-        // Clear remote streams
+        // Clear remote streams and tracks
         setRemoteVideoTrack(null)
         setRemoteAudioTrack(null)
-        setRemoteMediaStream(null)
+        
+        if (remoteStreamRef.current) {
+            remoteStreamRef.current.getTracks().forEach(track => track.stop())
+            remoteStreamRef.current = null
+        }
+        
+        if (remoteVideoRef.current) {
+            remoteVideoRef.current.srcObject = null
+        }
+
+        // Update state to disconnected
+        setConnectionStatus("disconnected")
+        
+        // Add disconnect message to chat
+        const disconnectMessage: Message = {
+            text: "You have disconnected from this chat.",
+            sender: "you",
+            timestamp: new Date(),
+        }
+        setMessages(prev => [...prev, disconnectMessage])
+
+        // Emit disconnect to server
+        if (socket) {
+            socket.emit("new-chat")
+        }
+    }
+
+    const handleNewChat = () => {
+        console.log("🔄 Starting new chat")
+        
+        // Clean up existing connections
+        if (sendingPc) {
+            sendingPc.close()
+            setSendingPc(null)
+        }
+        if (receivingPc) {
+            receivingPc.close()
+            setReceivingPc(null)
+        }
+
+        // Clear remote streams and tracks
+        setRemoteVideoTrack(null)
+        setRemoteAudioTrack(null)
+        
+        if (remoteStreamRef.current) {
+            remoteStreamRef.current.getTracks().forEach(track => track.stop())
+            remoteStreamRef.current = null
+        }
+        
+        if (remoteVideoRef.current) {
+            remoteVideoRef.current.srcObject = null
+        }
 
         // Clear messages and state
         setMessages([])
         setCurrentRoomId(null)
         setStrangerTyping(false)
         setConnectionStatus("connecting")
-
-        // Reset to lobby
         setLobby(true)
 
         // Emit new chat request
@@ -392,6 +502,16 @@ export const Room = ({
                         </p>
                     </div>
                     <div className="flex gap-2">
+                        {!lobby && connectionStatus === "connected" && (
+                            <Button
+                                variant="outline"
+                                className="bg-red-50 text-red-600 hover:bg-red-100 border-red-200"
+                                onClick={handleDisconnect}
+                            >
+                                <LogOut className="w-4 h-4 mr-2" />
+                                Disconnect
+                            </Button>
+                        )}
                         <Button
                             variant="outline"
                             className="bg-white text-blue-600 hover:bg-gray-100"
@@ -399,7 +519,7 @@ export const Room = ({
                             disabled={lobby && connectionStatus === "connecting"}
                         >
                             <SkipForward className="w-4 h-4 mr-2" />
-                            New Chat
+                            {connectionStatus === "disconnected" ? "Find New Partner" : "New Chat"}
                         </Button>
                     </div>
                 </div>
@@ -409,7 +529,7 @@ export const Room = ({
             <div className="flex-1 flex max-w-7xl mx-auto w-full">
                 {/* Video Section */}
                 <div className="flex-1 p-4">
-                    <div className={`grid gap-4 h-full grid-cols-1 lg:grid-cols-2`}>
+                    <div className="grid gap-4 h-full grid-cols-1 lg:grid-cols-2">
                         {/* Stranger's Video */}
                         <div className="bg-black rounded-lg overflow-hidden relative aspect-video lg:aspect-auto">
                             {lobby ? (
@@ -424,7 +544,7 @@ export const Room = ({
                                     <div className="text-center">
                                         <AlertCircle className="h-8 w-8 mx-auto mb-4 text-red-400" />
                                         <p>User disconnected</p>
-                                        <p className="text-sm text-gray-400 mt-2">Finding new partner...</p>
+                                        <p className="text-sm text-gray-400 mt-2">Click "Find New Partner" to continue</p>
                                     </div>
                                 </div>
                             ) : (
