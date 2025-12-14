@@ -5,11 +5,6 @@ import Redis from "ioredis";
 import dotenv from "dotenv";
 dotenv.config();
 
-/**
- * Configuration read from environment only.
- * (same notes as before)
- */
-
 const REDIS_URL = process.env.REDIS_URL || "";
 const REDIS_HOST = process.env.REDIS_HOST || "localhost";
 const REDIS_PORT = parseInt(process.env.REDIS_PORT || "6379", 10);
@@ -149,12 +144,7 @@ export class UserManager {
         this.initHandlers(socket);
     }
 
-    /**
-     * Called when a socket fully disconnects (socket.io disconnect event).
-     * This method also tries to re-queue participants of any room the socket was part of.
-     */
     async removeUser(socketId: string) {
-        // remove from redis/list metadata if possible
         if (this.redisAvailable && this.redis) {
             try {
                 await this.redis.lrem(this.QUEUE_KEY, 0, socketId);
@@ -164,18 +154,13 @@ export class UserManager {
             }
         }
 
-        // remove from local queue
         this.localQueue = this.localQueue.filter(x => x !== socketId);
 
-        // If the socket was in a room, RoomManager will return both sides:
-        // { remainingUser, removedUser }
         const pair = this.roomManager.removeUserFromRoom(socketId);
 
-        // If room existed, pair will be non-null — requeue both if possible.
         if (pair) {
             const { remainingUser, removedUser } = pair;
 
-            // Attempt to requeue remaining user (almost always connected)
             if (remainingUser && remainingUser.socket && remainingUser.socket.connected) {
                 if (this.redisAvailable && this.redis) {
                     try {
@@ -199,8 +184,6 @@ export class UserManager {
                 }
             }
 
-            // Attempt to requeue removedUser only if their socket object still indicates a connection.
-            // This covers voluntary leaves/new-chat flows where the socket still exists and is connected.
             if (removedUser && removedUser.socket && removedUser.socket.connected) {
                 if (this.redisAvailable && this.redis) {
                     try {
@@ -225,12 +208,10 @@ export class UserManager {
             }
         }
 
-        // Remove user from in-memory users list
         this.users = this.users.filter(x => x.socket.id !== socketId);
 
         if (QUEUE_LOGS) await this.logQueueStatus();
 
-        // try to match now
         setTimeout(async () => { await this.clearQueue(); }, 100);
     }
 
@@ -342,12 +323,71 @@ export class UserManager {
             this.roomManager.onTyping(roomId, socket.id, isTyping);
         });
 
-        // When user requests new chat explicitly we remove them from room and requeue both sides
+        // Handle reconnection confirmation
+        socket.on("confirm-reconnection", async ({ roomId }: { roomId: string }) => {
+            // Remove from queue if present
+            if (this.redisAvailable && this.redis) {
+                try {
+                    await this.redis.lrem(this.QUEUE_KEY, 0, socket.id);
+                } catch {
+                    this.redisAvailable = false;
+                }
+            }
+            this.localQueue = this.localQueue.filter(id => id !== socket.id);
+
+            this.roomManager.confirmReconnection(roomId, socket.id);
+        });
+
+        // Handle reconnection decline
+        socket.on("decline-reconnection", async ({ roomId }: { roomId: string }) => {
+            const otherUser = this.roomManager.declineReconnection(roomId, socket.id);
+
+            // Requeue both users
+            if (this.redisAvailable && this.redis) {
+                try {
+                    const isInQueue = await this.redis.lpos(this.QUEUE_KEY, socket.id);
+                    if (isInQueue === null) {
+                        await this.redis.rpush(this.QUEUE_KEY, socket.id);
+                    }
+                    socket.emit("lobby");
+
+                    if (otherUser && otherUser.socket.connected) {
+                        const otherInQueue = await this.redis.lpos(this.QUEUE_KEY, otherUser.socket.id);
+                        if (otherInQueue === null) {
+                            await this.redis.rpush(this.QUEUE_KEY, otherUser.socket.id);
+                        }
+                        otherUser.socket.emit("lobby");
+                    }
+                } catch {
+                    this.redisAvailable = false;
+                    if (!this.localQueue.includes(socket.id)) {
+                        this.localQueue.push(socket.id);
+                    }
+                    socket.emit("lobby");
+
+                    if (otherUser && otherUser.socket.connected && !this.localQueue.includes(otherUser.socket.id)) {
+                        this.localQueue.push(otherUser.socket.id);
+                        otherUser.socket.emit("lobby");
+                    }
+                }
+            } else {
+                if (!this.localQueue.includes(socket.id)) {
+                    this.localQueue.push(socket.id);
+                }
+                socket.emit("lobby");
+
+                if (otherUser && otherUser.socket.connected && !this.localQueue.includes(otherUser.socket.id)) {
+                    this.localQueue.push(otherUser.socket.id);
+                    otherUser.socket.emit("lobby");
+                }
+            }
+
+            setTimeout(async () => { await this.clearQueue(); }, 300);
+        });
+
         socket.on("new-chat", async () => {
-            // remove both participants from the room (if any)
             const pair = this.roomManager.removeUserFromRoom(socket.id);
 
-            // Requeue requester (socket.id) - they are connected here
             if (this.redisAvailable && this.redis) {
                 try {
                     const isInQueue = await this.redis.lpos(this.QUEUE_KEY, socket.id);
@@ -367,7 +407,6 @@ export class UserManager {
                 socket.emit("lobby");
             }
 
-            // Requeue the other participant if present & still connected
             if (pair && pair.remainingUser) {
                 const other = pair.remainingUser;
                 if (other.socket && other.socket.connected) {
@@ -396,7 +435,6 @@ export class UserManager {
                 }
             }
 
-            // schedule matching
             setTimeout(async () => { await this.clearQueue(); }, 300);
         });
 

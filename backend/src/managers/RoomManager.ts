@@ -6,6 +6,10 @@ let GLOBAL_ROOM_ID = 1;
 interface Room {
     user1: User;
     user2: User;
+    // Track reconnection confirmations
+    user1Confirmed?: boolean;
+    user2Confirmed?: boolean;
+    isPendingReconnection?: boolean;
 }
 
 interface RoomHistory {
@@ -14,9 +18,6 @@ interface RoomHistory {
     timestamp: number;
 }
 
-/**
- * Enable lightweight logging for room lifecycle events when ROOM_LOGS=true
- */
 const ROOM_LOGS = process.env.ROOM_LOGS === 'true';
 
 export class RoomManager {
@@ -27,7 +28,6 @@ export class RoomManager {
     constructor() {
         this.rooms = new Map<string, Room>();
 
-        // Clean up old history every minute
         setInterval(() => {
             const now = Date.now();
             this.roomHistory = this.roomHistory.filter(
@@ -36,9 +36,6 @@ export class RoomManager {
         }, 60000);
     }
 
-    /**
-     * Check if two users were recently in a room together
-     */
     private wereRecentlyMatched(socketId1: string, socketId2: string): boolean {
         return this.roomHistory.some(h =>
             (h.user1SocketId === socketId1 && h.user2SocketId === socketId2) ||
@@ -46,9 +43,6 @@ export class RoomManager {
         );
     }
 
-    /**
-     * Add room pair to history
-     */
     private addToHistory(user1SocketId: string, user2SocketId: string) {
         this.roomHistory.push({
             user1SocketId,
@@ -60,7 +54,6 @@ export class RoomManager {
     createRoom(user1: User, user2: User) {
         const roomId = this.generate().toString();
 
-        // Check if these users were recently matched
         const wasRecentMatch = this.wereRecentlyMatched(user1.socket.id, user2.socket.id);
 
         if (wasRecentMatch) {
@@ -68,7 +61,15 @@ export class RoomManager {
                 console.info(`🔄 Users ${user1.name} and ${user2.name} were recently matched. Asking for reconnection confirmation.`);
             }
 
-            // Notify both users they matched with the same person
+            // Store room as pending reconnection
+            this.rooms.set(roomId, {
+                user1,
+                user2,
+                user1Confirmed: false,
+                user2Confirmed: false,
+                isPendingReconnection: true
+            });
+
             user1.socket.emit("same-user-matched", {
                 roomId,
                 partnerName: user2.name,
@@ -80,18 +81,18 @@ export class RoomManager {
                 partnerName: user1.name,
                 partnerSocketId: user1.socket.id
             });
-
-            // Store room temporarily (will be confirmed or cancelled)
-            this.rooms.set(roomId, { user1, user2 });
         } else {
             // Normal room creation
-            this.rooms.set(roomId, { user1, user2 });
+            this.rooms.set(roomId, {
+                user1,
+                user2,
+                isPendingReconnection: false
+            });
 
-            // Add to history
             this.addToHistory(user1.socket.id, user2.socket.id);
 
             if (ROOM_LOGS) {
-                console.info(`Created room ${roomId} for users: ${user1.name} (${user1.socket.id}) and ${user2.name} (${user2.socket.id})`);
+                console.info(`✅ Created room ${roomId} for users: ${user1.name} and ${user2.name}`);
             }
 
             user1.socket.emit("send-offer", { roomId });
@@ -99,39 +100,58 @@ export class RoomManager {
         }
     }
 
-    /**
-     * Confirm reconnection with the same user
-     */
     confirmReconnection(roomId: string, socketId: string) {
         const room = this.rooms.get(roomId);
-        if (!room) return;
+        if (!room || !room.isPendingReconnection) {
+            if (ROOM_LOGS) console.warn(`Room ${roomId} not found or not pending reconnection`);
+            return;
+        }
+
+        // Mark the confirming user
+        if (room.user1.socket.id === socketId) {
+            room.user1Confirmed = true;
+        } else if (room.user2.socket.id === socketId) {
+            room.user2Confirmed = true;
+        }
 
         const user = room.user1.socket.id === socketId ? room.user1 : room.user2;
         const otherUser = room.user1.socket.id === socketId ? room.user2 : room.user1;
 
-        // Mark this user as confirmed
-        user.socket.emit("reconnection-confirmed");
-
-        // Check if both users have confirmed (we'll track this with a flag)
-        // For simplicity, we'll start the connection as soon as one confirms
-        // and the other will be notified
-        otherUser.socket.emit("partner-confirmed-reconnection");
-
         if (ROOM_LOGS) {
-            console.info(`User ${user.name} confirmed reconnection in room ${roomId}`);
+            console.info(`✅ User ${user.name} confirmed reconnection in room ${roomId}`);
+            console.info(`   Status: user1=${room.user1Confirmed}, user2=${room.user2Confirmed}`);
         }
 
-        // Update history timestamp
-        this.addToHistory(room.user1.socket.id, room.user2.socket.id);
+        // Notify the confirming user
+        user.socket.emit("reconnection-confirmed");
 
-        // Start the connection
-        room.user1.socket.emit("send-offer", { roomId });
-        room.user2.socket.emit("send-offer", { roomId });
+        // Check if BOTH users have confirmed
+        if (room.user1Confirmed && room.user2Confirmed) {
+            if (ROOM_LOGS) {
+                console.info(`🎉 Both users confirmed reconnection in room ${roomId}. Starting connection...`);
+            }
+
+            // Update the room to no longer be pending
+            room.isPendingReconnection = false;
+
+            // Update history
+            this.addToHistory(room.user1.socket.id, room.user2.socket.id);
+
+            // Notify both users that reconnection is happening
+            room.user1.socket.emit("partner-confirmed-reconnection");
+            room.user2.socket.emit("partner-confirmed-reconnection");
+
+            // Small delay to ensure state is clean on frontend, then start connection
+            setTimeout(() => {
+                room.user1.socket.emit("send-offer", { roomId });
+                room.user2.socket.emit("send-offer", { roomId });
+            }, 100);
+        } else {
+            // Only one user confirmed so far, notify the other
+            otherUser.socket.emit("partner-confirmed-reconnection");
+        }
     }
 
-    /**
-     * Decline reconnection and find new partner
-     */
     declineReconnection(roomId: string, socketId: string): User | null {
         const room = this.rooms.get(roomId);
         if (!room) return null;
@@ -140,7 +160,7 @@ export class RoomManager {
         const otherUser = room.user1.socket.id === socketId ? room.user2 : room.user1;
 
         if (ROOM_LOGS) {
-            console.info(`User ${decliningUser.name} declined reconnection in room ${roomId}`);
+            console.info(`❌ User ${decliningUser.name} declined reconnection in room ${roomId}`);
         }
 
         // Notify other user
@@ -149,7 +169,6 @@ export class RoomManager {
         // Delete the room
         this.rooms.delete(roomId);
 
-        // Return the other user so they can be re-queued
         return otherUser;
     }
 
@@ -159,6 +178,13 @@ export class RoomManager {
             if (ROOM_LOGS) console.warn(`Room ${roomId} not found for offer`);
             return;
         }
+
+        // Don't process offers if still pending reconnection
+        if (room.isPendingReconnection) {
+            if (ROOM_LOGS) console.warn(`Room ${roomId} still pending reconnection, ignoring offer`);
+            return;
+        }
+
         const receivingUser = room.user1.socket.id === senderSocketid ? room.user2 : room.user1;
         receivingUser.socket.emit("offer", { sdp, roomId });
     }
@@ -169,6 +195,12 @@ export class RoomManager {
             if (ROOM_LOGS) console.warn(`Room ${roomId} not found for answer`);
             return;
         }
+
+        if (room.isPendingReconnection) {
+            if (ROOM_LOGS) console.warn(`Room ${roomId} still pending reconnection, ignoring answer`);
+            return;
+        }
+
         const receivingUser = room.user1.socket.id === senderSocketid ? room.user2 : room.user1;
         receivingUser.socket.emit("answer", { sdp, roomId });
     }
@@ -179,6 +211,11 @@ export class RoomManager {
             if (ROOM_LOGS) console.warn(`Room ${roomId} not found for ICE candidate`);
             return;
         }
+
+        if (room.isPendingReconnection) {
+            return;
+        }
+
         const receivingUser = room.user1.socket.id === senderSocketid ? room.user2 : room.user1;
         receivingUser.socket.emit("add-ice-candidate", { candidate, type });
     }
@@ -219,8 +256,8 @@ export class RoomManager {
                 const remainingUser = room.user1.socket.id === socketId ? room.user2 : room.user1;
 
                 if (ROOM_LOGS) {
-                    console.info(`User ${removedUser.name} (${removedUser.socket.id}) removed from room ${roomId}`);
-                    console.info(`Remaining user: ${remainingUser.name} (${remainingUser.socket.id})`);
+                    console.info(`🚪 User ${removedUser.name} (${removedUser.socket.id}) removed from room ${roomId}`);
+                    console.info(`   Remaining user: ${remainingUser.name} (${remainingUser.socket.id})`);
                 }
 
                 remainingUser.socket.emit("user-disconnected", {
