@@ -8,6 +8,12 @@ interface Room {
     user2: User;
 }
 
+interface RoomHistory {
+    user1SocketId: string;
+    user2SocketId: string;
+    timestamp: number;
+}
+
 /**
  * Enable lightweight logging for room lifecycle events when ROOM_LOGS=true
  */
@@ -15,21 +21,136 @@ const ROOM_LOGS = process.env.ROOM_LOGS === 'true';
 
 export class RoomManager {
     private rooms: Map<string, Room>;
+    private roomHistory: RoomHistory[] = [];
+    private readonly HISTORY_TIMEOUT = 5 * 60 * 1000; // 5 minutes
 
     constructor() {
         this.rooms = new Map<string, Room>();
+
+        // Clean up old history every minute
+        setInterval(() => {
+            const now = Date.now();
+            this.roomHistory = this.roomHistory.filter(
+                h => now - h.timestamp < this.HISTORY_TIMEOUT
+            );
+        }, 60000);
+    }
+
+    /**
+     * Check if two users were recently in a room together
+     */
+    private wereRecentlyMatched(socketId1: string, socketId2: string): boolean {
+        return this.roomHistory.some(h =>
+            (h.user1SocketId === socketId1 && h.user2SocketId === socketId2) ||
+            (h.user1SocketId === socketId2 && h.user2SocketId === socketId1)
+        );
+    }
+
+    /**
+     * Add room pair to history
+     */
+    private addToHistory(user1SocketId: string, user2SocketId: string) {
+        this.roomHistory.push({
+            user1SocketId,
+            user2SocketId,
+            timestamp: Date.now()
+        });
     }
 
     createRoom(user1: User, user2: User) {
         const roomId = this.generate().toString();
-        this.rooms.set(roomId, { user1, user2 });
+
+        // Check if these users were recently matched
+        const wasRecentMatch = this.wereRecentlyMatched(user1.socket.id, user2.socket.id);
+
+        if (wasRecentMatch) {
+            if (ROOM_LOGS) {
+                console.info(`🔄 Users ${user1.name} and ${user2.name} were recently matched. Asking for reconnection confirmation.`);
+            }
+
+            // Notify both users they matched with the same person
+            user1.socket.emit("same-user-matched", {
+                roomId,
+                partnerName: user2.name,
+                partnerSocketId: user2.socket.id
+            });
+
+            user2.socket.emit("same-user-matched", {
+                roomId,
+                partnerName: user1.name,
+                partnerSocketId: user1.socket.id
+            });
+
+            // Store room temporarily (will be confirmed or cancelled)
+            this.rooms.set(roomId, { user1, user2 });
+        } else {
+            // Normal room creation
+            this.rooms.set(roomId, { user1, user2 });
+
+            // Add to history
+            this.addToHistory(user1.socket.id, user2.socket.id);
+
+            if (ROOM_LOGS) {
+                console.info(`Created room ${roomId} for users: ${user1.name} (${user1.socket.id}) and ${user2.name} (${user2.socket.id})`);
+            }
+
+            user1.socket.emit("send-offer", { roomId });
+            user2.socket.emit("send-offer", { roomId });
+        }
+    }
+
+    /**
+     * Confirm reconnection with the same user
+     */
+    confirmReconnection(roomId: string, socketId: string) {
+        const room = this.rooms.get(roomId);
+        if (!room) return;
+
+        const user = room.user1.socket.id === socketId ? room.user1 : room.user2;
+        const otherUser = room.user1.socket.id === socketId ? room.user2 : room.user1;
+
+        // Mark this user as confirmed
+        user.socket.emit("reconnection-confirmed");
+
+        // Check if both users have confirmed (we'll track this with a flag)
+        // For simplicity, we'll start the connection as soon as one confirms
+        // and the other will be notified
+        otherUser.socket.emit("partner-confirmed-reconnection");
 
         if (ROOM_LOGS) {
-            console.info(`Created room ${roomId} for users: ${user1.name} (${user1.socket.id}) and ${user2.name} (${user2.socket.id})`);
+            console.info(`User ${user.name} confirmed reconnection in room ${roomId}`);
         }
 
-        user1.socket.emit("send-offer", { roomId });
-        user2.socket.emit("send-offer", { roomId });
+        // Update history timestamp
+        this.addToHistory(room.user1.socket.id, room.user2.socket.id);
+
+        // Start the connection
+        room.user1.socket.emit("send-offer", { roomId });
+        room.user2.socket.emit("send-offer", { roomId });
+    }
+
+    /**
+     * Decline reconnection and find new partner
+     */
+    declineReconnection(roomId: string, socketId: string): User | null {
+        const room = this.rooms.get(roomId);
+        if (!room) return null;
+
+        const decliningUser = room.user1.socket.id === socketId ? room.user1 : room.user2;
+        const otherUser = room.user1.socket.id === socketId ? room.user2 : room.user1;
+
+        if (ROOM_LOGS) {
+            console.info(`User ${decliningUser.name} declined reconnection in room ${roomId}`);
+        }
+
+        // Notify other user
+        otherUser.socket.emit("partner-declined-reconnection");
+
+        // Delete the room
+        this.rooms.delete(roomId);
+
+        // Return the other user so they can be re-queued
+        return otherUser;
     }
 
     onOffer(roomId: string, sdp: string, senderSocketid: string) {
@@ -91,13 +212,6 @@ export class RoomManager {
         receivingUser.socket.emit("user-typing", { isTyping });
     }
 
-    /**
-     * Remove both users from the room if socketId belongs to either user.
-     * Returns an object containing both the remaining user (if any) and the removed user.
-     *
-     * - If this removal is triggered by a voluntary leave/new-chat, both sockets may be connected.
-     * - If triggered by a real socket disconnect, removedUser.socket.connected will usually be false.
-     */
     removeUserFromRoom(socketId: string): { remainingUser: User | null, removedUser: User | null } | null {
         for (const [roomId, room] of this.rooms.entries()) {
             if (room.user1.socket.id === socketId || room.user2.socket.id === socketId) {
@@ -109,12 +223,10 @@ export class RoomManager {
                     console.info(`Remaining user: ${remainingUser.name} (${remainingUser.socket.id})`);
                 }
 
-                // Notify remaining user that partner left (client handles requeue UI)
                 remainingUser.socket.emit("user-disconnected", {
                     message: "Your chat partner has left the room. Finding you a new partner..."
                 });
 
-                // delete room
                 this.rooms.delete(roomId);
 
                 return { remainingUser, removedUser };

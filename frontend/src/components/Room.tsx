@@ -1,8 +1,9 @@
+
 import { useEffect, useRef, useState } from "react"
 import { type Socket, io } from "socket.io-client"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
-import { Send, SkipForward, Mic, MicOff, Video, VideoOff, AlertCircle, LogOut } from "lucide-react"
+import { Send, SkipForward, Mic, MicOff, Video, VideoOff, AlertCircle, LogOut, Users } from "lucide-react"
 
 const URL = import.meta.env.VITE_API_URL;
 
@@ -41,6 +42,11 @@ export const Room = ({
     const [strangerTyping, setStrangerTyping] = useState(false)
     const [connectionStatus, setConnectionStatus] = useState<"connecting" | "connected" | "disconnected">("connecting")
 
+    // Reconnection state
+    const [showReconnectPrompt, setShowReconnectPrompt] = useState(false)
+    const [reconnectPartnerName, setReconnectPartnerName] = useState<string>("")
+    const [pendingRoomId, setPendingRoomId] = useState<string | null>(null)
+
     const typingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const remoteStreamRef = useRef<MediaStream | null>(null);
 
@@ -75,12 +81,38 @@ export const Room = ({
 
         socket.emit("join", { name })
 
+        socket.on("same-user-matched", ({ roomId, partnerName }) => {
+            console.log("🔄 Matched with the same user:", partnerName)
+            setShowReconnectPrompt(true)
+            setReconnectPartnerName(partnerName)
+            setPendingRoomId(roomId)
+            setLobby(false)
+        })
+
+        socket.on("partner-confirmed-reconnection", () => {
+            console.log("✅ Partner confirmed reconnection")
+            setShowReconnectPrompt(false)
+        })
+
+        socket.on("partner-declined-reconnection", () => {
+            console.log("❌ Partner declined reconnection")
+            setShowReconnectPrompt(false)
+            setLobby(true)
+            setPendingRoomId(null)
+        })
+
+        socket.on("reconnection-confirmed", () => {
+            console.log("✅ Reconnection confirmed")
+            setShowReconnectPrompt(false)
+        })
+
         socket.on('send-offer', async ({ roomId }) => {
             console.log("🔵 Sending offer - Setting up peer connection")
             setLobby(false)
             setCurrentRoomId(roomId)
             setConnectionStatus("connected")
-            
+            setShowReconnectPrompt(false)
+
             const pc = new RTCPeerConnection({
                 iceServers: [
                     { urls: 'stun:stun.l.google.com:19302' },
@@ -88,43 +120,36 @@ export const Room = ({
                 ]
             })
 
-            // Create and set up remote stream FIRST
             const stream = new MediaStream()
             remoteStreamRef.current = stream
             if (remoteVideoRef.current) {
                 remoteVideoRef.current.srcObject = stream
-                // Ensure video plays
                 remoteVideoRef.current.play().catch(e => console.log("Play error:", e))
             }
 
-            // Handle incoming tracks
             pc.ontrack = (e) => {
                 console.log("📹 Received track on sender side:", e.track.kind, "readyState:", e.track.readyState)
-                
+
                 const stream = remoteStreamRef.current
                 if (!stream) return
 
-                // Remove existing track of same kind if present
                 const existingTracks = stream.getTracks().filter(t => t.kind === e.track.kind)
                 existingTracks.forEach(t => stream.removeTrack(t))
 
-                // Add new track
                 stream.addTrack(e.track)
-                
+
                 if (e.track.kind === "video") {
                     setRemoteVideoTrack(e.track)
                 } else if (e.track.kind === "audio") {
                     setRemoteAudioTrack(e.track)
                 }
 
-                // Re-assign stream to ensure video element picks it up
                 if (remoteVideoRef.current && remoteVideoRef.current.srcObject !== stream) {
                     remoteVideoRef.current.srcObject = stream
                     remoteVideoRef.current.play().catch(e => console.log("Play error:", e))
                 }
             }
 
-            // Monitor connection state
             pc.onconnectionstatechange = () => {
                 console.log("Connection state:", pc.connectionState)
                 if (pc.connectionState === "failed" || pc.connectionState === "disconnected") {
@@ -133,8 +158,7 @@ export const Room = ({
             }
 
             setSendingPc(pc)
-            
-            // Add local tracks
+
             if (localVideoTrack) {
                 console.log("➕ Adding local video track")
                 pc.addTrack(localVideoTrack)
@@ -170,50 +194,45 @@ export const Room = ({
             setLobby(false)
             setCurrentRoomId(roomId)
             setConnectionStatus("connected")
-            
+            setShowReconnectPrompt(false)
+
             const pc = new RTCPeerConnection({
                 iceServers: [
                     { urls: 'stun:stun.l.google.com:19302' },
                     { urls: 'stun:stun1.l.google.com:19302' }
                 ]
             })
-            
-            // Create and set up remote stream FIRST
+
             const stream = new MediaStream()
             remoteStreamRef.current = stream
             if (remoteVideoRef.current) {
                 remoteVideoRef.current.srcObject = stream
                 remoteVideoRef.current.play().catch(e => console.log("Play error:", e))
             }
-            
-            // Handle incoming tracks
+
             pc.ontrack = (e) => {
                 console.log("📹 Received track on receiver side:", e.track.kind, "readyState:", e.track.readyState)
-                
+
                 const stream = remoteStreamRef.current
                 if (!stream) return
 
-                // Remove existing track of same kind if present
                 const existingTracks = stream.getTracks().filter(t => t.kind === e.track.kind)
                 existingTracks.forEach(t => stream.removeTrack(t))
 
-                // Add new track
                 stream.addTrack(e.track)
-                
+
                 if (e.track.kind === "video") {
                     setRemoteVideoTrack(e.track)
                 } else if (e.track.kind === "audio") {
                     setRemoteAudioTrack(e.track)
                 }
 
-                // Re-assign stream to ensure video element picks it up
                 if (remoteVideoRef.current && remoteVideoRef.current.srcObject !== stream) {
                     remoteVideoRef.current.srcObject = stream
                     remoteVideoRef.current.play().catch(e => console.log("Play error:", e))
                 }
             }
 
-            // Monitor connection state
             pc.onconnectionstatechange = () => {
                 console.log("Connection state:", pc.connectionState)
                 if (pc.connectionState === "failed" || pc.connectionState === "disconnected") {
@@ -221,7 +240,6 @@ export const Room = ({
                 }
             }
 
-            // Add local tracks BEFORE creating answer
             if (localVideoTrack) {
                 console.log("➕ Adding local video track")
                 pc.addTrack(localVideoTrack)
@@ -230,7 +248,7 @@ export const Room = ({
                 console.log("➕ Adding local audio track")
                 pc.addTrack(localAudioTrack)
             }
-            
+
             await pc.setRemoteDescription(remoteSdp)
             const sdp = await pc.createAnswer()
             await pc.setLocalDescription(sdp)
@@ -275,6 +293,8 @@ export const Room = ({
             setCurrentRoomId(null)
             setMessages([])
             setStrangerTyping(false)
+            setShowReconnectPrompt(false)
+            setPendingRoomId(null)
         })
 
         socket.on("add-ice-candidate", ({ candidate, type }) => {
@@ -282,7 +302,7 @@ export const Room = ({
             if (type == "sender") {
                 setReceivingPc(pc => {
                     if (pc) {
-                        pc.addIceCandidate(candidate).catch(e => 
+                        pc.addIceCandidate(candidate).catch(e =>
                             console.log("Error adding ICE candidate:", e)
                         )
                     }
@@ -291,7 +311,7 @@ export const Room = ({
             } else {
                 setSendingPc(pc => {
                     if (pc) {
-                        pc.addIceCandidate(candidate).catch(e => 
+                        pc.addIceCandidate(candidate).catch(e =>
                             console.log("Error adding ICE candidate:", e)
                         )
                     }
@@ -340,7 +360,6 @@ export const Room = ({
         }
     }, [name])
 
-    // Setup local video - separated from socket effect to avoid recreating socket
     useEffect(() => {
         if (localVideoRef.current && localVideoTrack) {
             const stream = new MediaStream([localVideoTrack])
@@ -349,19 +368,34 @@ export const Room = ({
         }
     }, [localVideoTrack])
 
-    // Handle audio toggle
     useEffect(() => {
         if (localAudioTrack) {
             localAudioTrack.enabled = isAudioEnabled
         }
     }, [isAudioEnabled, localAudioTrack])
 
-    // Handle video toggle
     useEffect(() => {
         if (localVideoTrack) {
             localVideoTrack.enabled = isVideoEnabled
         }
     }, [isVideoEnabled, localVideoTrack])
+
+    const handleConfirmReconnection = () => {
+        if (socket && pendingRoomId) {
+            console.log("✅ Confirming reconnection")
+            socket.emit("confirm-reconnection", { roomId: pendingRoomId })
+            setShowReconnectPrompt(false)
+        }
+    }
+
+    const handleDeclineReconnection = () => {
+        if (socket && pendingRoomId) {
+            console.log("❌ Declining reconnection")
+            socket.emit("decline-reconnection", { roomId: pendingRoomId })
+            setShowReconnectPrompt(false)
+            setPendingRoomId(null)
+        }
+    }
 
     const handleSendMessage = () => {
         if (message.trim() && socket && !lobby) {
@@ -379,7 +413,7 @@ export const Room = ({
             })
 
             setMessage("")
-            
+
             if (isTyping) {
                 setIsTyping(false)
                 socket.emit("typing", { isTyping: false, roomId: currentRoomId })
@@ -389,8 +423,7 @@ export const Room = ({
 
     const handleDisconnect = () => {
         console.log("🚪 User initiated disconnect")
-        
-        // Clean up existing connections
+
         if (sendingPc) {
             sendingPc.close()
             setSendingPc(null)
@@ -400,23 +433,20 @@ export const Room = ({
             setReceivingPc(null)
         }
 
-        // Clear remote streams and tracks
         setRemoteVideoTrack(null)
         setRemoteAudioTrack(null)
-        
+
         if (remoteStreamRef.current) {
             remoteStreamRef.current.getTracks().forEach(track => track.stop())
             remoteStreamRef.current = null
         }
-        
+
         if (remoteVideoRef.current) {
             remoteVideoRef.current.srcObject = null
         }
 
-        // Update state to disconnected
         setConnectionStatus("disconnected")
-        
-        // Add disconnect message to chat
+
         const disconnectMessage: Message = {
             text: "You have disconnected from this chat.",
             sender: "you",
@@ -424,7 +454,6 @@ export const Room = ({
         }
         setMessages(prev => [...prev, disconnectMessage])
 
-        // Emit disconnect to server
         if (socket) {
             socket.emit("new-chat")
         }
@@ -432,8 +461,7 @@ export const Room = ({
 
     const handleNewChat = () => {
         console.log("🔄 Starting new chat")
-        
-        // Clean up existing connections
+
         if (sendingPc) {
             sendingPc.close()
             setSendingPc(null)
@@ -443,27 +471,24 @@ export const Room = ({
             setReceivingPc(null)
         }
 
-        // Clear remote streams and tracks
         setRemoteVideoTrack(null)
         setRemoteAudioTrack(null)
-        
+
         if (remoteStreamRef.current) {
             remoteStreamRef.current.getTracks().forEach(track => track.stop())
             remoteStreamRef.current = null
         }
-        
+
         if (remoteVideoRef.current) {
             remoteVideoRef.current.srcObject = null
         }
 
-        // Clear messages and state
         setMessages([])
         setCurrentRoomId(null)
         setStrangerTyping(false)
         setConnectionStatus("connecting")
         setLobby(true)
 
-        // Emit new chat request
         if (socket) {
             socket.emit("new-chat")
         }
@@ -492,6 +517,47 @@ export const Room = ({
 
     return (
         <div className="min-h-screen bg-gray-100 flex flex-col">
+            {/* Reconnection Prompt Modal */}
+            {showReconnectPrompt && (
+                <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+                    <div className="bg-white rounded-lg p-6 max-w-md w-full shadow-xl">
+                        <div className="flex items-center gap-3 mb-4">
+                            <div className="bg-blue-100 p-3 rounded-full">
+                                <Users className="w-6 h-6 text-blue-600" />
+                            </div>
+                            <div>
+                                <h3 className="text-lg font-semibold text-gray-900">
+                                    Same User Matched!
+                                </h3>
+                                <p className="text-sm text-gray-600">
+                                    You've been matched with {reconnectPartnerName} again
+                                </p>
+                            </div>
+                        </div>
+
+                        <p className="text-gray-700 mb-6">
+                            Would you like to reconnect with {reconnectPartnerName}?
+                        </p>
+
+                        <div className="flex gap-3">
+                            <Button
+                                onClick={handleConfirmReconnection}
+                                className="flex-1 bg-blue-600 hover:bg-blue-700"
+                            >
+                                Yes, Reconnect
+                            </Button>
+                            <Button
+                                onClick={handleDeclineReconnection}
+                                variant="outline"
+                                className="flex-1"
+                            >
+                                Find Someone New
+                            </Button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
             {/* Header */}
             <div className="bg-blue-600 text-white p-3 md:p-4">
                 <div className="max-w-7xl mx-auto flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
@@ -518,7 +584,7 @@ export const Room = ({
                             size="sm"
                             className="bg-white text-blue-600 hover:bg-gray-100 flex-1 sm:flex-none"
                             onClick={handleNewChat}
-                            disabled={lobby && connectionStatus === "connecting"}
+                            disabled={(lobby && connectionStatus === "connecting") || showReconnectPrompt}
                         >
                             <SkipForward className="w-3 h-3 md:w-4 md:h-4 mr-1 md:mr-2" />
                             <span className="text-xs md:text-sm">{connectionStatus === "disconnected" ? "Find New Partner" : "New Chat"}</span>
@@ -534,11 +600,13 @@ export const Room = ({
                     <div className="grid gap-2 md:gap-4 h-full grid-cols-1 sm:grid-cols-2">
                         {/* Stranger's Video */}
                         <div className="bg-black rounded-lg overflow-hidden relative aspect-video sm:aspect-auto min-h-[200px] sm:min-h-0">
-                            {lobby ? (
+                            {lobby || showReconnectPrompt ? (
                                 <div className="flex items-center justify-center h-full text-white">
                                     <div className="text-center">
                                         <div className="animate-spin rounded-full h-6 w-6 md:h-8 md:w-8 border-b-2 border-white mx-auto mb-2 md:mb-4"></div>
-                                        <p className="text-xs md:text-sm">Connecting...</p>
+                                        <p className="text-xs md:text-sm">
+                                            {showReconnectPrompt ? "Waiting for response..." : "Connecting..."}
+                                        </p>
                                     </div>
                                 </div>
                             ) : connectionStatus === "disconnected" ? (
@@ -604,13 +672,12 @@ export const Room = ({
                     <div className="p-3 md:p-4 border-b border-gray-200">
                         <h3 className="font-semibold text-gray-800 text-sm md:text-base">Chat</h3>
                         <div className="flex items-center gap-2">
-                            <div className={`w-2 h-2 rounded-full ${
-                                connectionStatus === "connected" ? "bg-green-500" : 
-                                connectionStatus === "disconnected" ? "bg-red-500" : "bg-yellow-500"
-                            }`} />
+                            <div className={`w-2 h-2 rounded-full ${connectionStatus === "connected" ? "bg-green-500" :
+                                    connectionStatus === "disconnected" ? "bg-red-500" : "bg-yellow-500"
+                                }`} />
                             <p className="text-xs md:text-sm text-gray-600">
-                                {lobby ? "Waiting for connection..." : 
-                                 connectionStatus === "disconnected" ? "Disconnected" : "Connected"}
+                                {lobby || showReconnectPrompt ? "Waiting for connection..." :
+                                    connectionStatus === "disconnected" ? "Disconnected" : "Connected"}
                             </p>
                         </div>
                     </div>
@@ -619,17 +686,16 @@ export const Room = ({
                     <div className="flex-1 overflow-y-auto p-3 md:p-4 space-y-2 md:space-y-3 min-h-0">
                         {messages.length === 0 ? (
                             <div className="text-center text-gray-500 text-xs md:text-sm">
-                                {lobby ? "Messages will appear here once connected" : "Start the conversation!"}
+                                {lobby || showReconnectPrompt ? "Messages will appear here once connected" : "Start the conversation!"}
                             </div>
                         ) : (
                             messages.map((msg, index) => (
                                 <div key={index} className={`${msg.sender === "you" ? "text-right" : "text-left"}`}>
                                     <div
-                                        className={`inline-block max-w-[85%] sm:max-w-xs px-2 md:px-3 py-1.5 md:py-2 rounded-lg text-xs md:text-sm ${
-                                            msg.sender === "you"
+                                        className={`inline-block max-w-[85%] sm:max-w-xs px-2 md:px-3 py-1.5 md:py-2 rounded-lg text-xs md:text-sm ${msg.sender === "you"
                                                 ? "bg-blue-600 text-white"
                                                 : "bg-gray-200 text-gray-800"
-                                        }`}
+                                            }`}
                                     >
                                         {msg.text}
                                     </div>
@@ -639,7 +705,7 @@ export const Room = ({
                                 </div>
                             ))
                         )}
-                        
+
                         {/* Typing indicator */}
                         {strangerTyping && (
                             <div className="text-left">
@@ -657,10 +723,9 @@ export const Room = ({
                                 </div>
                             </div>
                         )}
-                        
+
                         <div ref={messagesEndRef} />
                     </div>
-
                     {/* Message Input */}
                     <div className="p-3 md:p-4 border-t border-gray-200">
                         <div className="flex gap-2">
