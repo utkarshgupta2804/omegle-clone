@@ -6,7 +6,6 @@ let GLOBAL_ROOM_ID = 1;
 interface Room {
     user1: User;
     user2: User;
-    // Track reconnection confirmations
     user1Confirmed?: boolean;
     user2Confirmed?: boolean;
     isPendingReconnection?: boolean;
@@ -18,20 +17,34 @@ interface RoomHistory {
     timestamp: number;
 }
 
+// NEW: Track recent disconnections to prevent immediate rematch
+interface DisconnectCooldown {
+    user1SocketId: string;
+    user2SocketId: string;
+    timestamp: number;
+}
+
 const ROOM_LOGS = process.env.ROOM_LOGS === 'true';
 
 export class RoomManager {
     private rooms: Map<string, Room>;
     private roomHistory: RoomHistory[] = [];
+    private disconnectCooldowns: DisconnectCooldown[] = []; // NEW
     private readonly HISTORY_TIMEOUT = 5 * 60 * 1000; // 5 minutes
+    private readonly DISCONNECT_COOLDOWN = 30 * 1000; // NEW: 30 seconds cooldown
 
     constructor() {
         this.rooms = new Map<string, Room>();
 
         setInterval(() => {
             const now = Date.now();
+            // Clean up old history
             this.roomHistory = this.roomHistory.filter(
                 h => now - h.timestamp < this.HISTORY_TIMEOUT
+            );
+            // Clean up old cooldowns
+            this.disconnectCooldowns = this.disconnectCooldowns.filter(
+                d => now - d.timestamp < this.DISCONNECT_COOLDOWN
             );
         }, 60000);
     }
@@ -40,6 +53,37 @@ export class RoomManager {
         return this.roomHistory.some(h =>
             (h.user1SocketId === socketId1 && h.user2SocketId === socketId2) ||
             (h.user1SocketId === socketId2 && h.user2SocketId === socketId1)
+        );
+    }
+
+    // NEW: Check if users recently disconnected from each other
+    private isInDisconnectCooldown(socketId1: string, socketId2: string): boolean {
+        const now = Date.now();
+        return this.disconnectCooldowns.some(d => {
+            const isMatch = (d.user1SocketId === socketId1 && d.user2SocketId === socketId2) ||
+                           (d.user1SocketId === socketId2 && d.user2SocketId === socketId1);
+            return isMatch && (now - d.timestamp < this.DISCONNECT_COOLDOWN);
+        });
+    }
+
+    // NEW: Add users to disconnect cooldown
+    private addToDisconnectCooldown(user1SocketId: string, user2SocketId: string) {
+        this.disconnectCooldowns.push({
+            user1SocketId,
+            user2SocketId,
+            timestamp: Date.now()
+        });
+        
+        if (ROOM_LOGS) {
+            console.info(`🚫 Added disconnect cooldown for ${user1SocketId} and ${user2SocketId}`);
+        }
+    }
+
+    // NEW: Remove from cooldown (when users explicitly reconnect)
+    private removeFromDisconnectCooldown(user1SocketId: string, user2SocketId: string) {
+        this.disconnectCooldowns = this.disconnectCooldowns.filter(d =>
+            !((d.user1SocketId === user1SocketId && d.user2SocketId === user2SocketId) ||
+              (d.user1SocketId === user2SocketId && d.user2SocketId === user1SocketId))
         );
     }
 
@@ -52,8 +96,15 @@ export class RoomManager {
     }
 
     createRoom(user1: User, user2: User) {
-        const roomId = this.generate().toString();
+        // NEW: Check disconnect cooldown first
+        if (this.isInDisconnectCooldown(user1.socket.id, user2.socket.id)) {
+            if (ROOM_LOGS) {
+                console.info(`⏳ Users ${user1.name} and ${user2.name} are in disconnect cooldown. Skipping match.`);
+            }
+            return false; // Don't create room, let queue try next pair
+        }
 
+        const roomId = this.generate().toString();
         const wasRecentMatch = this.wereRecentlyMatched(user1.socket.id, user2.socket.id);
 
         if (wasRecentMatch) {
@@ -61,9 +112,8 @@ export class RoomManager {
                 console.info(`🔄 Users ${user1.name} and ${user2.name} were recently matched. Asking for reconnection confirmation.`);
             }
 
-            // Store room as pending reconnection
-            this.rooms.set(roomId, {
-                user1,
+            this.rooms.set(roomId, { 
+                user1, 
                 user2,
                 user1Confirmed: false,
                 user2Confirmed: false,
@@ -82,9 +132,8 @@ export class RoomManager {
                 partnerSocketId: user1.socket.id
             });
         } else {
-            // Normal room creation
-            this.rooms.set(roomId, {
-                user1,
+            this.rooms.set(roomId, { 
+                user1, 
                 user2,
                 isPendingReconnection: false
             });
@@ -98,6 +147,8 @@ export class RoomManager {
             user1.socket.emit("send-offer", { roomId });
             user2.socket.emit("send-offer", { roomId });
         }
+
+        return true; // Room created successfully
     }
 
     confirmReconnection(roomId: string, socketId: string) {
@@ -107,7 +158,6 @@ export class RoomManager {
             return;
         }
 
-        // Mark the confirming user
         if (room.user1.socket.id === socketId) {
             room.user1Confirmed = true;
         } else if (room.user2.socket.id === socketId) {
@@ -122,32 +172,27 @@ export class RoomManager {
             console.info(`   Status: user1=${room.user1Confirmed}, user2=${room.user2Confirmed}`);
         }
 
-        // Notify the confirming user
         user.socket.emit("reconnection-confirmed");
 
-        // Check if BOTH users have confirmed
         if (room.user1Confirmed && room.user2Confirmed) {
             if (ROOM_LOGS) {
                 console.info(`🎉 Both users confirmed reconnection in room ${roomId}. Starting connection...`);
             }
 
-            // Update the room to no longer be pending
             room.isPendingReconnection = false;
-
-            // Update history
             this.addToHistory(room.user1.socket.id, room.user2.socket.id);
+            
+            // NEW: Remove from disconnect cooldown since they explicitly reconnected
+            this.removeFromDisconnectCooldown(room.user1.socket.id, room.user2.socket.id);
 
-            // Notify both users that reconnection is happening
             room.user1.socket.emit("partner-confirmed-reconnection");
             room.user2.socket.emit("partner-confirmed-reconnection");
 
-            // Small delay to ensure state is clean on frontend, then start connection
             setTimeout(() => {
                 room.user1.socket.emit("send-offer", { roomId });
                 room.user2.socket.emit("send-offer", { roomId });
             }, 100);
         } else {
-            // Only one user confirmed so far, notify the other
             otherUser.socket.emit("partner-confirmed-reconnection");
         }
     }
@@ -163,10 +208,7 @@ export class RoomManager {
             console.info(`❌ User ${decliningUser.name} declined reconnection in room ${roomId}`);
         }
 
-        // Notify other user
         otherUser.socket.emit("partner-declined-reconnection");
-
-        // Delete the room
         this.rooms.delete(roomId);
 
         return otherUser;
@@ -178,8 +220,7 @@ export class RoomManager {
             if (ROOM_LOGS) console.warn(`Room ${roomId} not found for offer`);
             return;
         }
-
-        // Don't process offers if still pending reconnection
+        
         if (room.isPendingReconnection) {
             if (ROOM_LOGS) console.warn(`Room ${roomId} still pending reconnection, ignoring offer`);
             return;
@@ -254,6 +295,9 @@ export class RoomManager {
             if (room.user1.socket.id === socketId || room.user2.socket.id === socketId) {
                 const removedUser = room.user1.socket.id === socketId ? room.user1 : room.user2;
                 const remainingUser = room.user1.socket.id === socketId ? room.user2 : room.user1;
+
+                // NEW: Add to disconnect cooldown
+                this.addToDisconnectCooldown(room.user1.socket.id, room.user2.socket.id);
 
                 if (ROOM_LOGS) {
                     console.info(`🚪 User ${removedUser.name} (${removedUser.socket.id}) removed from room ${roomId}`);

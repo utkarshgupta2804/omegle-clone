@@ -161,58 +161,57 @@ export class UserManager {
         if (pair) {
             const { remainingUser, removedUser } = pair;
 
-            if (remainingUser && remainingUser.socket && remainingUser.socket.connected) {
-                if (this.redisAvailable && this.redis) {
-                    try {
-                        const isInQueue = await this.redis.lpos(this.QUEUE_KEY, remainingUser.socket.id);
-                        if (isInQueue === null) {
-                            await this.redis.rpush(this.QUEUE_KEY, remainingUser.socket.id);
-                            remainingUser.socket.emit("lobby");
-                        }
-                    } catch {
-                        this.redisAvailable = false;
-                        if (!this.localQueue.includes(remainingUser.socket.id)) {
-                            this.localQueue.push(remainingUser.socket.id);
-                            remainingUser.socket.emit("lobby");
-                        }
-                    }
-                } else {
-                    if (!this.localQueue.includes(remainingUser.socket.id)) {
-                        this.localQueue.push(remainingUser.socket.id);
-                        remainingUser.socket.emit("lobby");
-                    }
+            // NEW: Add delay before re-queuing to let frontend clean up
+            setTimeout(async () => {
+                if (remainingUser && remainingUser.socket && remainingUser.socket.connected) {
+                    await this.requeue(remainingUser.socket.id);
                 }
-            }
 
-            if (removedUser && removedUser.socket && removedUser.socket.connected) {
-                if (this.redisAvailable && this.redis) {
-                    try {
-                        const isInQueue = await this.redis.lpos(this.QUEUE_KEY, removedUser.socket.id);
-                        if (isInQueue === null) {
-                            await this.redis.rpush(this.QUEUE_KEY, removedUser.socket.id);
-                            removedUser.socket.emit("lobby");
-                        }
-                    } catch {
-                        this.redisAvailable = false;
-                        if (!this.localQueue.includes(removedUser.socket.id)) {
-                            this.localQueue.push(removedUser.socket.id);
-                            removedUser.socket.emit("lobby");
-                        }
-                    }
-                } else {
-                    if (!this.localQueue.includes(removedUser.socket.id)) {
-                        this.localQueue.push(removedUser.socket.id);
-                        removedUser.socket.emit("lobby");
-                    }
+                if (removedUser && removedUser.socket && removedUser.socket.connected) {
+                    await this.requeue(removedUser.socket.id);
                 }
-            }
+
+                // Try to match after both are re-queued
+                setTimeout(async () => { await this.clearQueue(); }, 200);
+            }, 500); // 500ms delay for frontend cleanup
         }
 
         this.users = this.users.filter(x => x.socket.id !== socketId);
 
         if (QUEUE_LOGS) await this.logQueueStatus();
+    }
 
-        setTimeout(async () => { await this.clearQueue(); }, 100);
+    // NEW: Helper function to requeue a user
+    private async requeue(socketId: string) {
+        if (this.redisAvailable && this.redis) {
+            try {
+                const isInQueue = await this.redis.lpos(this.QUEUE_KEY, socketId);
+                if (isInQueue === null) {
+                    await this.redis.rpush(this.QUEUE_KEY, socketId);
+                    const user = this.users.find(u => u.socket.id === socketId);
+                    if (user) {
+                        user.socket.emit("lobby");
+                    }
+                }
+            } catch {
+                this.redisAvailable = false;
+                if (!this.localQueue.includes(socketId)) {
+                    this.localQueue.push(socketId);
+                    const user = this.users.find(u => u.socket.id === socketId);
+                    if (user) {
+                        user.socket.emit("lobby");
+                    }
+                }
+            }
+        } else {
+            if (!this.localQueue.includes(socketId)) {
+                this.localQueue.push(socketId);
+                const user = this.users.find(u => u.socket.id === socketId);
+                if (user) {
+                    user.socket.emit("lobby");
+                }
+            }
+        }
     }
 
     async clearQueue() {
@@ -240,7 +239,20 @@ export class UserManager {
                         break;
                     }
 
-                    this.roomManager.createRoom(user1, user2);
+                    // NEW: Check if room was created (false = in cooldown)
+                    const roomCreated = this.roomManager.createRoom(user1, user2);
+
+                    if (!roomCreated) {
+                        // Users are in cooldown, put them back at end of queue
+                        await this.redis.rpush(this.QUEUE_KEY, user1.socket.id);
+                        await this.redis.rpush(this.QUEUE_KEY, user2.socket.id);
+                        if (QUEUE_LOGS) {
+                            console.info(`⏳ Users in cooldown, re-queued at end`);
+                        }
+                        // Try next pair
+                        remaining = await this.redis.llen(this.QUEUE_KEY);
+                        continue;
+                    }
 
                     remaining = await this.redis.llen(this.QUEUE_KEY);
                     if (remaining < 2) break;
@@ -271,7 +283,18 @@ export class UserManager {
                 return;
             }
 
-            this.roomManager.createRoom(user1, user2);
+            // NEW: Check if room was created (false = in cooldown)
+            const roomCreated = this.roomManager.createRoom(user1, user2);
+
+            if (!roomCreated) {
+                // Users are in cooldown, put them back at end of queue
+                this.localQueue.push(user1.socket.id);
+                this.localQueue.push(user2.socket.id);
+                if (QUEUE_LOGS) {
+                    console.info(`⏳ Users in cooldown, re-queued at end`);
+                }
+                return; // Wait for cooldown to expire
+            }
         }
     }
 
@@ -323,9 +346,7 @@ export class UserManager {
             this.roomManager.onTyping(roomId, socket.id, isTyping);
         });
 
-        // Handle reconnection confirmation
         socket.on("confirm-reconnection", async ({ roomId }: { roomId: string }) => {
-            // Remove from queue if present
             if (this.redisAvailable && this.redis) {
                 try {
                     await this.redis.lrem(this.QUEUE_KEY, 0, socket.id);
@@ -338,104 +359,37 @@ export class UserManager {
             this.roomManager.confirmReconnection(roomId, socket.id);
         });
 
-        // Handle reconnection decline
         socket.on("decline-reconnection", async ({ roomId }: { roomId: string }) => {
             const otherUser = this.roomManager.declineReconnection(roomId, socket.id);
 
-            // Requeue both users
-            if (this.redisAvailable && this.redis) {
-                try {
-                    const isInQueue = await this.redis.lpos(this.QUEUE_KEY, socket.id);
-                    if (isInQueue === null) {
-                        await this.redis.rpush(this.QUEUE_KEY, socket.id);
-                    }
-                    socket.emit("lobby");
+            // NEW: Add delay before re-queuing
+            setTimeout(async () => {
+                await this.requeue(socket.id);
 
-                    if (otherUser && otherUser.socket.connected) {
-                        const otherInQueue = await this.redis.lpos(this.QUEUE_KEY, otherUser.socket.id);
-                        if (otherInQueue === null) {
-                            await this.redis.rpush(this.QUEUE_KEY, otherUser.socket.id);
-                        }
-                        otherUser.socket.emit("lobby");
-                    }
-                } catch {
-                    this.redisAvailable = false;
-                    if (!this.localQueue.includes(socket.id)) {
-                        this.localQueue.push(socket.id);
-                    }
-                    socket.emit("lobby");
-
-                    if (otherUser && otherUser.socket.connected && !this.localQueue.includes(otherUser.socket.id)) {
-                        this.localQueue.push(otherUser.socket.id);
-                        otherUser.socket.emit("lobby");
-                    }
+                if (otherUser && otherUser.socket.connected) {
+                    await this.requeue(otherUser.socket.id);
                 }
-            } else {
-                if (!this.localQueue.includes(socket.id)) {
-                    this.localQueue.push(socket.id);
-                }
-                socket.emit("lobby");
 
-                if (otherUser && otherUser.socket.connected && !this.localQueue.includes(otherUser.socket.id)) {
-                    this.localQueue.push(otherUser.socket.id);
-                    otherUser.socket.emit("lobby");
-                }
-            }
-
-            setTimeout(async () => { await this.clearQueue(); }, 300);
+                setTimeout(async () => { await this.clearQueue(); }, 200);
+            }, 300);
         });
 
         socket.on("new-chat", async () => {
             const pair = this.roomManager.removeUserFromRoom(socket.id);
 
-            if (this.redisAvailable && this.redis) {
-                try {
-                    const isInQueue = await this.redis.lpos(this.QUEUE_KEY, socket.id);
-                    if (isInQueue === null) {
-                        await this.redis.rpush(this.QUEUE_KEY, socket.id);
-                        socket.emit("lobby");
-                    } else {
-                        socket.emit("lobby");
-                    }
-                } catch {
-                    this.redisAvailable = false;
-                    if (!this.localQueue.includes(socket.id)) this.localQueue.push(socket.id);
-                    socket.emit("lobby");
-                }
-            } else {
-                if (!this.localQueue.includes(socket.id)) this.localQueue.push(socket.id);
-                socket.emit("lobby");
-            }
+            // NEW: Add delay before re-queuing
+            setTimeout(async () => {
+                await this.requeue(socket.id);
 
-            if (pair && pair.remainingUser) {
-                const other = pair.remainingUser;
-                if (other.socket && other.socket.connected) {
-                    if (this.redisAvailable && this.redis) {
-                        try {
-                            const isInQueue = await this.redis.lpos(this.QUEUE_KEY, other.socket.id);
-                            if (isInQueue === null) {
-                                await this.redis.rpush(this.QUEUE_KEY, other.socket.id);
-                                other.socket.emit("lobby");
-                            } else {
-                                other.socket.emit("lobby");
-                            }
-                        } catch {
-                            this.redisAvailable = false;
-                            if (!this.localQueue.includes(other.socket.id)) {
-                                this.localQueue.push(other.socket.id);
-                                other.socket.emit("lobby");
-                            }
-                        }
-                    } else {
-                        if (!this.localQueue.includes(other.socket.id)) {
-                            this.localQueue.push(other.socket.id);
-                            other.socket.emit("lobby");
-                        }
+                if (pair && pair.remainingUser) {
+                    const other = pair.remainingUser;
+                    if (other.socket && other.socket.connected) {
+                        await this.requeue(other.socket.id);
                     }
                 }
-            }
 
-            setTimeout(async () => { await this.clearQueue(); }, 300);
+                setTimeout(async () => { await this.clearQueue(); }, 200);
+            }, 300);
         });
 
         socket.on("join", async ({ name }: { name: string }) => {
