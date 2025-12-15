@@ -161,7 +161,6 @@ export class UserManager {
         if (pair) {
             const { remainingUser, removedUser } = pair;
 
-            // NEW: Add delay before re-queuing to let frontend clean up
             setTimeout(async () => {
                 if (remainingUser && remainingUser.socket && remainingUser.socket.connected) {
                     await this.requeue(remainingUser.socket.id);
@@ -171,9 +170,8 @@ export class UserManager {
                     await this.requeue(removedUser.socket.id);
                 }
 
-                // Try to match after both are re-queued
                 setTimeout(async () => { await this.clearQueue(); }, 200);
-            }, 500); // 500ms delay for frontend cleanup
+            }, 500);
         }
 
         this.users = this.users.filter(x => x.socket.id !== socketId);
@@ -181,7 +179,6 @@ export class UserManager {
         if (QUEUE_LOGS) await this.logQueueStatus();
     }
 
-    // NEW: Helper function to requeue a user
     private async requeue(socketId: string) {
         if (this.redisAvailable && this.redis) {
             try {
@@ -239,17 +236,14 @@ export class UserManager {
                         break;
                     }
 
-                    // NEW: Check if room was created (false = in cooldown)
                     const roomCreated = this.roomManager.createRoom(user1, user2);
-
+                    
                     if (!roomCreated) {
-                        // Users are in cooldown, put them back at end of queue
                         await this.redis.rpush(this.QUEUE_KEY, user1.socket.id);
                         await this.redis.rpush(this.QUEUE_KEY, user2.socket.id);
                         if (QUEUE_LOGS) {
                             console.info(`⏳ Users in cooldown, re-queued at end`);
                         }
-                        // Try next pair
                         remaining = await this.redis.llen(this.QUEUE_KEY);
                         continue;
                     }
@@ -283,17 +277,15 @@ export class UserManager {
                 return;
             }
 
-            // NEW: Check if room was created (false = in cooldown)
             const roomCreated = this.roomManager.createRoom(user1, user2);
-
+            
             if (!roomCreated) {
-                // Users are in cooldown, put them back at end of queue
                 this.localQueue.push(user1.socket.id);
                 this.localQueue.push(user2.socket.id);
                 if (QUEUE_LOGS) {
                     console.info(`⏳ Users in cooldown, re-queued at end`);
                 }
-                return; // Wait for cooldown to expire
+                return;
             }
         }
     }
@@ -360,24 +352,28 @@ export class UserManager {
         });
 
         socket.on("decline-reconnection", async ({ roomId }: { roomId: string }) => {
-            const otherUser = this.roomManager.declineReconnection(roomId, socket.id);
+            const result = this.roomManager.declineReconnection(roomId, socket.id);
 
-            // NEW: Add delay before re-queuing
-            setTimeout(async () => {
-                await this.requeue(socket.id);
+            if (result) {
+                // NEW: Re-queue both users after decline
+                setTimeout(async () => {
+                    await this.requeue(result.user1.socket.id);
+                    await this.requeue(result.user2.socket.id);
+                    setTimeout(async () => { await this.clearQueue(); }, 200);
+                }, 300);
+            }
+        });
 
-                if (otherUser && otherUser.socket.connected) {
-                    await this.requeue(otherUser.socket.id);
-                }
-
-                setTimeout(async () => { await this.clearQueue(); }, 200);
-            }, 300);
+        // NEW: Handle reconnection timeout
+        socket.on("reconnection-timeout", async () => {
+            // User will be automatically re-queued by frontend
+            await this.requeue(socket.id);
+            setTimeout(async () => { await this.clearQueue(); }, 200);
         });
 
         socket.on("new-chat", async () => {
             const pair = this.roomManager.removeUserFromRoom(socket.id);
 
-            // NEW: Add delay before re-queuing
             setTimeout(async () => {
                 await this.requeue(socket.id);
 

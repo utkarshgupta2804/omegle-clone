@@ -1,9 +1,8 @@
-
 import { useEffect, useRef, useState } from "react"
 import { type Socket, io } from "socket.io-client"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
-import { Send, SkipForward, Mic, MicOff, Video, VideoOff, AlertCircle, LogOut, Users } from "lucide-react"
+import { Send, SkipForward, Mic, MicOff, Video, VideoOff, AlertCircle, LogOut, Users, Clock } from "lucide-react"
 
 const URL = import.meta.env.VITE_API_URL;
 
@@ -46,6 +45,8 @@ export const Room = ({
     const [showReconnectPrompt, setShowReconnectPrompt] = useState(false)
     const [reconnectPartnerName, setReconnectPartnerName] = useState<string>("")
     const [pendingRoomId, setPendingRoomId] = useState<string | null>(null)
+    const [waitingForPartner, setWaitingForPartner] = useState(false) // NEW: Waiting state
+    const [partnerWaiting, setPartnerWaiting] = useState(false) // NEW: Partner confirmed first
 
     const typingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const remoteStreamRef = useRef<MediaStream | null>(null);
@@ -87,23 +88,48 @@ export const Room = ({
             setReconnectPartnerName(partnerName)
             setPendingRoomId(roomId)
             setLobby(false)
+            setWaitingForPartner(false)
+            setPartnerWaiting(false)
         })
 
-        socket.on("partner-confirmed-reconnection", () => {
-            console.log("✅ Partner confirmed reconnection")
+        // NEW: Handle "you confirmed, waiting for partner"
+        socket.on("reconnection-confirmed", () => {
+            console.log("✅ You confirmed, waiting for partner...")
+            setWaitingForPartner(true)
+        })
+
+        // NEW: Handle "partner is waiting for you"
+        socket.on("partner-waiting", ({ partnerName }) => {
+            console.log("⏳ Partner confirmed, waiting for you...", partnerName)
+            setPartnerWaiting(true)
+        })
+
+        // NEW: Handle "both confirmed, starting connection"
+        socket.on("both-confirmed-reconnection", () => {
+            console.log("🎉 Both users confirmed, starting connection...")
             setShowReconnectPrompt(false)
+            setWaitingForPartner(false)
+            setPartnerWaiting(false)
         })
 
         socket.on("partner-declined-reconnection", () => {
             console.log("❌ Partner declined reconnection")
             setShowReconnectPrompt(false)
+            setWaitingForPartner(false)
+            setPartnerWaiting(false)
             setLobby(true)
             setPendingRoomId(null)
         })
 
-        socket.on("reconnection-confirmed", () => {
-            console.log("✅ Reconnection confirmed")
+        // NEW: Handle reconnection timeout
+        socket.on("reconnection-timeout", () => {
+            console.log("⏰ Reconnection timed out")
             setShowReconnectPrompt(false)
+            setWaitingForPartner(false)
+            setPartnerWaiting(false)
+            setLobby(true)
+            setPendingRoomId(null)
+            socket.emit("reconnection-timeout")
         })
 
         socket.on('send-offer', async ({ roomId }) => {
@@ -112,6 +138,8 @@ export const Room = ({
             setCurrentRoomId(roomId)
             setConnectionStatus("connected")
             setShowReconnectPrompt(false)
+            setWaitingForPartner(false)
+            setPartnerWaiting(false)
 
             const pc = new RTCPeerConnection({
                 iceServers: [
@@ -195,6 +223,8 @@ export const Room = ({
             setCurrentRoomId(roomId)
             setConnectionStatus("connected")
             setShowReconnectPrompt(false)
+            setWaitingForPartner(false)
+            setPartnerWaiting(false)
 
             const pc = new RTCPeerConnection({
                 iceServers: [
@@ -294,6 +324,8 @@ export const Room = ({
             setMessages([])
             setStrangerTyping(false)
             setShowReconnectPrompt(false)
+            setWaitingForPartner(false)
+            setPartnerWaiting(false)
             setPendingRoomId(null)
         })
 
@@ -384,7 +416,7 @@ export const Room = ({
         if (socket && pendingRoomId) {
             console.log("✅ Confirming reconnection")
             socket.emit("confirm-reconnection", { roomId: pendingRoomId })
-            setShowReconnectPrompt(false)
+            // Don't hide prompt yet - wait for both confirmations
         }
     }
 
@@ -393,6 +425,8 @@ export const Room = ({
             console.log("❌ Declining reconnection")
             socket.emit("decline-reconnection", { roomId: pendingRoomId })
             setShowReconnectPrompt(false)
+            setWaitingForPartner(false)
+            setPartnerWaiting(false)
             setPendingRoomId(null)
         }
     }
@@ -535,25 +569,64 @@ export const Room = ({
                             </div>
                         </div>
 
-                        <p className="text-gray-700 mb-6">
-                            Would you like to reconnect with {reconnectPartnerName}?
-                        </p>
+                        {/* Show different states */}
+                        {waitingForPartner ? (
+                            <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 mb-6">
+                                <div className="flex items-center gap-3">
+                                    <Clock className="w-5 h-5 text-blue-600 animate-pulse" />
+                                    <div>
+                                        <p className="text-sm font-medium text-blue-900">
+                                            Waiting for {reconnectPartnerName}...
+                                        </p>
+                                        <p className="text-xs text-blue-700 mt-1">
+                                            You've confirmed. Waiting for their response.
+                                        </p>
+                                    </div>
+                                </div>
+                            </div>
+                        ) : partnerWaiting ? (
+                            <div className="bg-green-50 border border-green-200 rounded-lg p-4 mb-6">
+                                <div className="flex items-center gap-3">
+                                    <Clock className="w-5 h-5 text-green-600 animate-pulse" />
+                                    <div>
+                                        <p className="text-sm font-medium text-green-900">
+                                            {reconnectPartnerName} is waiting!
+                                        </p>
+                                        <p className="text-xs text-green-700 mt-1">
+                                            They've confirmed. Make your choice.
+                                        </p>
+                                    </div>
+                                </div>
+                            </div>
+                        ) : (
+                            <p className="text-gray-700 mb-6">
+                                Would you like to reconnect with {reconnectPartnerName}?
+                            </p>
+                        )}
 
                         <div className="flex gap-3">
                             <Button
                                 onClick={handleConfirmReconnection}
                                 className="flex-1 bg-blue-600 hover:bg-blue-700"
+                                disabled={waitingForPartner}
                             >
-                                Yes, Reconnect
+                                {waitingForPartner ? "Confirmed ✓" : "Yes, Reconnect"}
                             </Button>
                             <Button
                                 onClick={handleDeclineReconnection}
                                 variant="outline"
                                 className="flex-1"
+                                disabled={waitingForPartner}
                             >
                                 Find Someone New
                             </Button>
                         </div>
+
+                        {!waitingForPartner && (
+                            <p className="text-xs text-gray-500 text-center mt-3">
+                                Both users must confirm to reconnect
+                            </p>
+                        )}
                     </div>
                 </div>
             )}
